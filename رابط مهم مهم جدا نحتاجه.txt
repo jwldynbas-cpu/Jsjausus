@@ -1,0 +1,464 @@
+# ============================================================
+# 🔥 Encrypt X Deobfuscator - Discord Bot
+# 📌 https://discord.gg/W3QyhJEwY
+# ============================================================
+
+import discord
+from discord.ext import commands
+from discord import app_commands
+import asyncio
+import logging
+import requests
+import json
+import re
+import base64
+import os
+import random
+import string
+from datetime import datetime
+import io
+from pathlib import Path
+
+# 🔑 ضع توكن بوتك هنا
+TOKEN = "MTUzODY0OTcyOTAzNzExMTMyNw.GVUunj.lrwg9ALtfT6CVSdOmMJmI6ddp1Zs_LdqY5ixjs"
+
+# 👑 معرف المالك
+OWNER_ID = 1522241987883962570
+
+# 🏠 معرف السيرفر
+GUILD_ID = 1538537588208705620
+
+# 💬 معرف القناة
+CHANNEL_ID = 1538537589290827872
+
+# ✅ إعدادات البوت
+intents = discord.Intents.default()
+intents.message_content = True
+intents.members = True
+
+bot = commands.Bot(command_prefix='!', intents=intents)
+
+# 📁 مجلد للمخرجات
+OUTPUT_DIR = Path("outputs")
+OUTPUT_DIR.mkdir(exist_ok=True)
+
+# 📁 مجلد مؤقت
+TEMP_DIR = Path("temp_files")
+TEMP_DIR.mkdir(exist_ok=True)
+
+# ============================================================
+# 📋 إعدادات التسجيل
+# ============================================================
+
+logging.basicConfig(
+    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
+    level=logging.INFO
+)
+logger = logging.getLogger(__name__)
+
+# ============================================================
+# 🔧 وظائف Encrypt X
+# ============================================================
+
+def upload_to_pastefy(content: str) -> str:
+    """رفع المحتوى إلى Pastefy"""
+    try:
+        header = "DUMPER is bot HROXEN\nTELEGRAM @HROXEN_FOR_DUMPER_BOT\n\n"
+        full_content = header + content
+        
+        files = {'file': ('file.txt', full_content)}
+        response = requests.post('https://pastefy.app', files=files, timeout=30)
+        if response.status_code == 200:
+            paste_id = response.text.strip()
+            match = re.search(r'pastefy\.app/([a-zA-Z0-9]+)', paste_id)
+            if match:
+                paste_id = match.group(1)
+            return f"https://pastefy.app/{paste_id}/raw"
+        return None
+    except Exception as e:
+        logger.error(f"خطأ في رفع Pastefy: {e}")
+        return None
+
+
+def decrypt_encryptx_script(script: str, key: str) -> str:
+    """فك تشفير سكربت Encrypt X"""
+    try:
+        padding = 8 - (len(script) % 8)
+        if padding != 8:
+            script += "=" * padding
+        
+        data = base64.b32decode(script)
+        key_bytes = key.encode('utf-8')
+        result = bytes([data[i] ^ key_bytes[i % len(key_bytes)] for i in range(len(data))])
+        
+        return result.decode('utf-8', errors='ignore')
+    except Exception as e:
+        logger.error(f"خطأ في فك التشفير: {e}")
+        return f"[Error: {e}]"
+
+
+def extract_id_from_url(url: str) -> str:
+    """استخراج ID من الرابط"""
+    match = re.search(r'[?&]Id=([^&]+)', url)
+    return match.group(1) if match else None
+
+
+def get_encryptx_data(script_id: str) -> dict:
+    """جلب بيانات Encrypt X"""
+    urls = [
+        f"https://raw.githubusercontent.com/ScriptObfuscator2/Scripts/main/{script_id}",
+        f"https://proxy.2677929.xyz/https://raw.githubusercontent.com/ScriptObfuscator2/Scripts/main/{script_id}"
+    ]
+    
+    for url in urls:
+        try:
+            response = requests.get(url, timeout=15)
+            if response.status_code == 200:
+                try:
+                    data = json.loads(response.text)
+                    if 'Key' in data and 'Script' in data:
+                        return data
+                except:
+                    return {'Script': response.text.strip()}
+        except Exception as e:
+            logger.error(f"خطأ في جلب البيانات: {e}")
+            continue
+    
+    return None
+
+
+def generate_random_filename() -> str:
+    """توليد اسم ملف عشوائي"""
+    letters = string.ascii_lowercase + string.digits
+    return ''.join(random.choice(letters) for _ in range(12))
+
+
+def save_script_to_file(script: str, script_id: str) -> str:
+    """حفظ السكربت في ملف"""
+    filename = generate_random_filename() + ".txt"
+    filepath = OUTPUT_DIR / filename
+    
+    with open(filepath, "w", encoding="utf-8") as f:
+        f.write("=" * 60 + "\n")
+        f.write("DUMPER is bot HROXEN\n")
+        f.write("TELEGRAM @HROXEN_FOR_DUMPER_BOT\n")
+        f.write("=" * 60 + "\n\n")
+        f.write(script + "\n\n")
+        f.write("=" * 60 + "\n")
+        f.write("تم تفكيك تشفير\n")
+        f.write(f"ID: {script_id}\n")
+        f.write(f"التاريخ: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n")
+        f.write("=" * 60)
+    
+    return str(filepath)
+
+# ============================================================
+# 📊 واجهة النتائج (مصححة)
+# ============================================================
+
+class ResultView(discord.ui.View):
+    def __init__(self, pastefy_url, filepath, filename):
+        super().__init__(timeout=300)
+        self.pastefy_url = pastefy_url
+        self.filepath = filepath
+        self.filename = filename
+        
+        # إضافة زر Pastefy (مع url)
+        if pastefy_url:
+            self.add_item(
+                discord.ui.Button(
+                    label="محرر",
+                    style=discord.ButtonStyle.link,
+                    url=pastefy_url
+                )
+            )
+    
+    @discord.ui.button(label=" تحميل الملف", style=discord.ButtonStyle.green)
+    async def download_button(self, interaction: discord.Interaction, button: discord.ui.Button):
+        try:
+            with open(self.filepath, 'rb') as f:
+                await interaction.response.send_message(
+                    file=discord.File(f, self.filename),
+                    ephemeral=True
+                )
+        except Exception as e:
+            await interaction.response.send_message(f" خطأ: {str(e)}", ephemeral=True)
+    
+    @discord.ui.button(label=" نسخ النص", style=discord.ButtonStyle.blurple)
+    async def copy_button(self, interaction: discord.Interaction, button: discord.ui.Button):
+        try:
+            with open(self.filepath, 'r', encoding='utf-8') as f:
+                content = f.read()
+                if len(content) > 1900:
+                    await interaction.response.send_message(
+                        "❌ النص طويل جداً! استخدم زر التحميل",
+                        ephemeral=True
+                    )
+                else:
+                    await interaction.response.send_message(
+                        f"```\n{content[:1900]}\n```",
+                        ephemeral=True
+                    )
+        except Exception as e:
+            await interaction.response.send_message(f" خطأ: {str(e)}", ephemeral=True)
+
+# ============================================================
+# 🤖 أوامر البوت
+# ============================================================
+
+@bot.event
+async def on_ready():
+    print(f'✅ Encrypt X Deobfuscator جاهز! متصل كـ {bot.user}')
+    print(f'📍 متصل بـ {len(bot.guilds)} سيرفر')
+    print('📌 اكتب "هلو" لبدء المحادثة')
+    
+    try:
+        synced = await bot.tree.sync()
+        print(f"✅ تم مزامنة {len(synced)} أمر")
+    except Exception as e:
+        print(f"❌ خطأ في المزامنة: {e}")
+
+@bot.event
+async def on_message(message):
+    if message.author == bot.user:
+        return
+    
+    # ✅ الرد على "هلو"
+    if message.content.lower() in ['هلو', 'هلا', 'مرحبا', 'hello', 'hi', 'hey', 'سلام']:
+        embed = discord.Embed(
+            title=" مرحباً! أنا Encrypt X Deobfuscator",
+            description="بوت استخراج وفك تشفير سكربتات Encrypt X",
+            color=discord.Color.purple()
+        )
+        embed.add_field(
+            name=" كيفية الاستخدام",
+            value=" أرسل رابط Encrypt X\n انتظر البوت 5 ثواني\n سيتم فك التشفير وإرسال الملف",
+            inline=False
+        )
+        embed.add_field(
+            name="مثال",
+            value="https://encrypt-x.pages.dev/Denied?Id=2967458055833",
+            inline=False
+        )
+        embed.add_field(
+            name="سيرفرنه رابطه https://discord.gg/W3QyhJEwY",
+            value="استمتع",
+            inline=False
+        )
+        await message.channel.send(embed=embed)
+        return
+    
+    # ✅ معالجة الروابط
+    if 'http' in message.content:
+        urls = re.findall(r'https?://[^\s<>]+', message.content)
+        
+        for url in urls:
+            if 'encrypt-x.pages.dev' in url:
+                script_id = extract_id_from_url(url)
+                if not script_id:
+                    await message.channel.send(" السكربت محذوف")
+                    return
+                
+                status_msg = await message.channel.send(f" جاري المعالجة (ID: {script_id})...")
+                
+                data = get_encryptx_data(script_id)
+                
+                if not data:
+                    await status_msg.edit(content=f" السكربت غير موجود (ID: {script_id})")
+                    return
+                
+                key = data.get('Key', '')
+                script = data.get('Script', '')
+                date = data.get('Date', 'غير معروف')
+                
+                if script and all(c.isupper() or c.isdigit() for c in script[:50]):
+                    await status_msg.edit(content=f" جاري فك التشفير...")
+                    
+                    decrypted = decrypt_encryptx_script(script, key)
+                    
+                    if decrypted and len(decrypted) > 10:
+                        filepath = save_script_to_file(decrypted, script_id)
+                        filename = os.path.basename(filepath)
+                        pastefy_url = upload_to_pastefy(decrypted)
+                        
+                        embed = discord.Embed(
+                            title=" تم فك التشفير بنجاح!",
+                            description=f"**التاريخ:** {date}\n**حجم السكربت:** {len(decrypted):,} حرف",
+                            color=discord.Color.green()
+                        )
+                        embed.add_field(name=" ID", value=f"`{script_id}`", inline=True)
+                        embed.add_field(name=" الملف", value=f"`{filename}`", inline=True)
+                        embed.set_footer(text="Encrypt X Deobfuscator")
+                        
+                        view = ResultView(pastefy_url, filepath, filename)
+                        await status_msg.edit(content=None, embed=embed, view=view)
+                        
+                        # إرسال الملف
+                        with open(filepath, 'rb') as f:
+                            await message.channel.send(
+                                file=discord.File(f, filename),
+                                content=" الملف المفكوك"
+                            )
+                    else:
+                        await status_msg.edit(content=" فشل في فك التشفير!")
+                else:
+                    filepath = save_script_to_file(script, script_id)
+                    filename = os.path.basename(filepath)
+                    pastefy_url = upload_to_pastefy(script)
+                    
+                    embed = discord.Embed(
+                        title=" تم استخراج السكربت!",
+                        description=f"**التاريخ:** {date}\n**حجم السكربت:** {len(script):,} حرف",
+                        color=discord.Color.green()
+                    )
+                    embed.add_field(name=" ID", value=f"`{script_id}`", inline=True)
+                    embed.add_field(name=" الملف", value=f"`{filename}`", inline=True)
+                    embed.set_footer(text="Encrypt X Deobfuscator")
+                    
+                    view = ResultView(pastefy_url, filepath, filename)
+                    await status_msg.edit(content=None, embed=embed, view=view)
+                    
+                    with open(filepath, 'rb') as f:
+                        await message.channel.send(
+                            file=discord.File(f, filename),
+                            content=" الملف المستخرج"
+                        )
+                
+                return
+    
+    await bot.process_commands(message)
+
+# ============================================================
+# 🖥️ أوامر النص
+# ============================================================
+
+@bot.command(name='فك')
+async def decrypt_cmd(ctx, *, url: str):
+    """فك تشفير سكربت Encrypt X"""
+    if ctx.author.id != OWNER_ID:
+        await ctx.send(" ليس لديك صلاحية!")
+        return
+    
+    if 'encrypt-x.pages.dev' not in url:
+        await ctx.send(" يرجى إدخال رابط Encrypt X صحيح!")
+        return
+    
+    script_id = extract_id_from_url(url)
+    if not script_id:
+        await ctx.send(" لم يتم العثور على ID في الرابط!")
+        return
+    
+    status_msg = await ctx.send(f" جاري المعالجة (ID: {script_id})...")
+    
+    data = get_encryptx_data(script_id)
+    
+    if not data:
+        await status_msg.edit(content=f" السكربت غير موجود (ID: {script_id})")
+        return
+    
+    key = data.get('Key', '')
+    script = data.get('Script', '')
+    date = data.get('Date', 'غير معروف')
+    
+    if script and all(c.isupper() or c.isdigit() for c in script[:50]):
+        await status_msg.edit(content=f" جاري فك التشفير...")
+        
+        decrypted = decrypt_encryptx_script(script, key)
+        
+        if decrypted and len(decrypted) > 10:
+            filepath = save_script_to_file(decrypted, script_id)
+            filename = os.path.basename(filepath)
+            pastefy_url = upload_to_pastefy(decrypted)
+            
+            embed = discord.Embed(
+                title=" تم فك التشفير بنجاح!",
+                description=f"**التاريخ:** {date}\n**حجم السكربت:** {len(decrypted):,} حرف",
+                color=discord.Color.green()
+            )
+            embed.add_field(name=" ID", value=f"`{script_id}`", inline=True)
+            embed.add_field(name=" الملف", value=f"`{filename}`", inline=True)
+            embed.set_footer(text="Encrypt X Deobfuscator")
+            
+            view = ResultView(pastefy_url, filepath, filename)
+            await status_msg.edit(content=None, embed=embed, view=view)
+            
+            with open(filepath, 'rb') as f:
+                await ctx.send(file=discord.File(f, filename))
+        else:
+            await status_msg.edit(content=" فشل في فك التشفير!")
+    else:
+        filepath = save_script_to_file(script, script_id)
+        filename = os.path.basename(filepath)
+        pastefy_url = upload_to_pastefy(script)
+        
+        embed = discord.Embed(
+            title=" تم استخراج السكربت!",
+            description=f"**التاريخ:** {date}\n**حجم السكربت:** {len(script):,} حرف",
+            color=discord.Color.green()
+        )
+        embed.add_field(name=" ID", value=f"`{script_id}`", inline=True)
+        embed.add_field(name=" الملف", value=f"`{filename}`", inline=True)
+        embed.set_footer(text="Encrypt X Deobfuscator")
+        
+        view = ResultView(pastefy_url, filepath, filename)
+        await status_msg.edit(content=None, embed=embed, view=view)
+        
+        with open(filepath, 'rb') as f:
+            await ctx.send(file=discord.File(f, filename))
+
+@bot.command(name='تنظيف')
+async def cleanup_cmd(ctx):
+    """تنظيف الملفات المؤقتة"""
+    if ctx.author.id != OWNER_ID:
+        await ctx.send(" هذا الأمر للمالك فقط!")
+        return
+    
+    try:
+        for file in TEMP_DIR.glob('*'):
+            if file.is_file():
+                file.unlink()
+        for file in OUTPUT_DIR.glob('*'):
+            if file.is_file():
+                file.unlink()
+        await ctx.send(" تم تنظيف جميع الملفات المؤقتة!")
+    except Exception as e:
+        await ctx.send(f" خطأ: {str(e)}")
+
+@bot.command(name='مساعدة')
+async def help_cmd(ctx):
+    """عرض المساعدة"""
+    embed = discord.Embed(
+        title=" Encrypt X Deobfuscator",
+        description="بوت استخراج وفك تشفير سكربتات Encrypt X",
+        color=discord.Color.blue()
+    )
+    embed.add_field(
+        name=" الأوامر",
+        value="• `هلو` - بدء المحادثة\n• `!فك <رابط>` - فك تشفير سكربت\n• `!تنظيف` - تنظيف الملفات\n• `!مساعدة` - هذه الرسالة",
+        inline=False
+    )
+    embed.add_field(
+        name=" مثال",
+        value="`!فك https://encrypt-x.pages.dev/Denied?Id=2967458055833`",
+        inline=False
+    )
+    embed.add_field(
+        name=" تحذير",
+        value="استخدم للأغراض التعليمية فقط!",
+        inline=False
+    )
+    await ctx.send(embed=embed)
+
+# ============================================================
+# 🚀 تشغيل البوت
+# ============================================================
+
+if __name__ == "__main__":
+    print(" جاري تشغيل Encrypt X Deobfuscator...")
+    print(" اكتب 'هلو' لبدء المحادثة")
+    try:
+        bot.run(TOKEN)
+    except discord.LoginFailure:
+        print(" خطأ: توكن البوت غير صحيح!")
+    except Exception as e:
+        print(f" خطأ: {e}")
